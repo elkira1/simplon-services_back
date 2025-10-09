@@ -23,7 +23,8 @@ from django.conf.urls.static import static
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('core.urls')),
-    path('auth/', include('core.urls')),  # Add this line
+    path('auth/', include('core.urls')),
+    path('/', include('core.urls')),# Add this line
 ]
 # Servir les fichiers media en développement
 if settings.DEBUG:
