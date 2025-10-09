@@ -20,12 +20,17 @@ from django.conf import settings
 from django.conf.urls.static import static
 
 
+# urlpatterns = [
+#     path('admin/', admin.site.urls),
+#     path('api/', include('core.urls')),
+#     path('auth/', include('core.urls')),
+#     path('/', include('core.urls')),# Add this line
+# ]
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/', include('core.urls')),
-    path('auth/', include('core.urls')),
-    path('/', include('core.urls')),# Add this line
+    path('', include('core.urls')),  # Changed from 'api/' to ''
 ]
+
 # Servir les fichiers media en développement
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
