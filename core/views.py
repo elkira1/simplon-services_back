@@ -77,6 +77,25 @@ def get_purchase_requests_queryset_for_user(user):
     role_filter = filter_builder(user)
     return base_queryset if role_filter is None else base_queryset.filter(role_filter)
 
+
+def get_role_specific_requests(requests, role, user_id):
+    """Filtrer les demandes visibles selon le rôle pour le dashboard"""
+    if role == 'employee':
+        return requests.filter(user_id=user_id)
+    elif role == 'mg':
+        return requests
+    elif role == 'accounting':
+        return requests.filter(
+            Q(status__in=['mg_approved', 'accounting_reviewed', 'director_approved']) |
+            Q(status='rejected', rejected_by_role='accounting')
+        )
+    elif role == 'director':
+        return requests.filter(
+            Q(status__in=['accounting_reviewed', 'director_approved']) |
+            Q(status='rejected', rejected_by_role='director')
+        )
+    return requests.none()
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def current_user(request):
@@ -1002,35 +1021,151 @@ def attachment_delete(request, pk):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def dashboard(request):
-    """Données pour le tableau de bord avec logique corrigée par rôle"""
-    user_role = request.user.role
-    user_id = request.user.id
-    
-    all_requests = PurchaseRequest.objects.select_related('user', 'rejected_by').all()
-    
-    # def get_period_stats(months_offset=0, user_filter=None):
-    #     """Calculer les stats pour une période donnée avec offset et filtre utilisateur optionnel"""
-    #     now = timezone.now()
-    #     start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    #     start_date = start_date - timedelta(days=30 * months_offset)
-        
-    #     if months_offset > 0:
-    #         end_date = start_date.replace(day=1) + timedelta(days=32)
-    #         end_date = end_date.replace(day=1) - timedelta(seconds=1)
-    #     else:
-    #         end_date = now
-            
-    #     if user_filter:
-    #         period_requests = user_filter.filter(
-    #             created_at__gte=start_date,
-    #             created_at__lte=end_date
-    #         )
-    #     else:
-    #         period_requests = all_requests.filter(
-    #             created_at__gte=start_date,
-    #             created_at__lte=end_date
-    #         )
-    
+    """Données détaillées pour le tableau de bord (flow, files d'attente, performance)"""
+    user = request.user
+    user_role = user.role
+    user_id = user.id
+
+    ROLE_QUEUE_STATUS = {
+        'employee': ['pending', 'mg_approved', 'accounting_reviewed'],
+        'mg': ['pending'],
+        'accounting': ['mg_approved'],
+        'director': ['accounting_reviewed'],
+    }
+    ROLE_VALIDATED_FIELD = {
+        'mg': 'mg_validated_by',
+        'accounting': 'accounting_validated_by',
+        'director': 'approved_by',
+    }
+    ROLE_DURATION_FIELDS = {
+        'mg': ('created_at', 'mg_validated_at'),
+        'accounting': ('mg_validated_at', 'accounting_validated_at'),
+        'director': ('accounting_validated_at', 'approved_at'),
+    }
+    ROLE_LABELS = {
+        'employee': 'Employés',
+        'mg': 'Moyens Généraux',
+        'accounting': 'Comptabilité',
+        'director': 'Direction',
+    }
+
+    now = timezone.now()
+    today = timezone.localdate()
+
+    all_requests = PurchaseRequest.objects.select_related(
+        'user',
+        'rejected_by',
+        'mg_validated_by',
+        'accounting_validated_by',
+        'approved_by'
+    ).prefetch_related('steps')
+
+    owned_requests = all_requests.filter(user=user)
+
+    # Helper pour sélectionner les demandes visibles selon le rôle
+    if user_role == 'employee':
+        visible_requests = owned_requests
+    else:
+        visible_requests = get_role_specific_requests(all_requests, user_role, user_id)
+        if visible_requests is None:
+            visible_requests = all_requests.none()
+
+    queue_statuses = ROLE_QUEUE_STATUS.get(user_role, [])
+    if user_role == 'employee':
+        queue_queryset = owned_requests.filter(status__in=queue_statuses)
+    else:
+        queue_queryset = all_requests.filter(status__in=queue_statuses)
+
+    validated_field = ROLE_VALIDATED_FIELD.get(user_role)
+    if validated_field:
+        my_validated = all_requests.filter(**{validated_field: user})
+    else:
+        my_validated = PurchaseRequest.objects.none()
+
+    my_rejections = all_requests.filter(rejected_by=user, rejected_by_role=user_role)
+
+    def serialize_actor(actor, timestamp):
+        if not actor or not timestamp:
+            if actor:
+                return {
+                    'id': actor.id,
+                    'name': actor.get_full_name() or actor.username,
+                    'performed_at': None,
+                }
+            return None
+        return {
+            'id': actor.id,
+            'name': actor.get_full_name() or actor.username,
+            'performed_at': timezone.localtime(timestamp),
+        }
+
+    def serialize_step(step):
+        if not step:
+            return None
+        return {
+            'id': step.id,
+            'action': step.action,
+            'action_display': step.get_action_display(),
+            'comment': step.comment,
+            'performed_at': timezone.localtime(step.created_at),
+            'performed_by': {
+                'id': step.user_id,
+                'name': step.user.get_full_name() or step.user.username,
+                'role': step.user.role,
+            },
+            'request_id': step.request_id,
+            'request_description': step.request.item_description,
+            'request_status': step.request.status,
+            'request_status_display': step.request.get_status_display(),
+        }
+
+    def serialize_request_card(obj):
+        steps = list(obj.steps.all())
+        latest_step = steps[0] if steps else None
+        amount = obj.final_cost or obj.estimated_cost or Decimal('0')
+        return {
+            'id': obj.id,
+            'item_description': obj.item_description,
+            'status': obj.status,
+            'status_display': obj.get_status_display(),
+            'current_step': obj.current_step,
+            'urgency': obj.urgency,
+            'urgency_display': obj.get_urgency_display(),
+            'amount': float(amount),
+            'requested_by': {
+                'id': obj.user_id,
+                'name': obj.user.get_full_name() or obj.user.username,
+                'department': obj.user.department,
+            },
+            'submitted_at': obj.created_at,
+            'waiting_days': max((now - obj.created_at).days, 0),
+            'actors': {
+                'mg': serialize_actor(obj.mg_validated_by, obj.mg_validated_at),
+                'accounting': serialize_actor(obj.accounting_validated_by, obj.accounting_validated_at),
+                'director': serialize_actor(obj.approved_by, obj.approved_at),
+                'rejected': serialize_actor(obj.rejected_by, obj.rejected_at),
+            },
+            'last_action': serialize_step(latest_step),
+        }
+
+    queue_details = [
+        serialize_request_card(req) for req in queue_queryset.order_by('created_at')[:8]
+    ]
+    flow_snapshot = [
+        serialize_request_card(req) for req in visible_requests.order_by('-created_at')[:5]
+    ]
+
+    if user_role == 'employee':
+        recent_actions_qs = RequestStep.objects.select_related('request', 'user').filter(
+            request__user=user
+        ).order_by('-created_at')[:6]
+    else:
+        recent_actions_qs = RequestStep.objects.select_related('request', 'user').filter(
+            user=user
+        ).order_by('-created_at')[:6]
+
+    recent_actions = [serialize_step(step) for step in recent_actions_qs]
+
     def get_period_stats(months_offset=0, user_filter=None):
         now = timezone.now()
         start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - relativedelta(months=months_offset)
@@ -1050,10 +1185,6 @@ def dashboard(request):
                 created_at__lte=end_date
             )
             
-        logger.info(f"Calculating stats for period: {start_date} to {end_date}")
-
-
-        
         approved_queryset = period_requests.filter(status='director_approved')
         
         total_amount = approved_queryset.annotate(
@@ -1067,12 +1198,6 @@ def dashboard(request):
         
         approved_count = approved_queryset.count()
         total_requests = period_requests.count()
-        
-        
-        
-        logger.info(f"Total amount {total_amount}")
-        logger.info(f"Approved requests count: {approved_count}")
-        logger.info(list(approved_queryset.values("id", "final_cost", "estimated_cost")))
         
         
         
@@ -1185,308 +1310,183 @@ def dashboard(request):
             }]
 
     
-    def get_role_specific_requests(requests, role, user_id):
-        """Filtrer les demandes selon le niveau de responsabilité"""
-        if role == 'employee':
-            return requests.filter(user_id=user_id)
-            
-        elif role == 'mg':
-            return requests.filter(
-                Q(status__in=['pending', 'mg_approved', 'accounting_reviewed', 'director_approved']) |
-                Q(status='rejected', rejected_by_role='mg')
-            )
-            
-        elif role == 'accounting':
-            return requests.filter(
-                Q(status__in=['mg_approved', 'accounting_reviewed', 'director_approved']) |
-                Q(status='rejected', rejected_by_role='accounting')
-            )
-            
-        elif role == 'director':
-            return requests.filter(
-                Q(status__in=['accounting_reviewed', 'director_approved']) |
-                Q(status='rejected', rejected_by_role='director')
-            )
-        
-        return requests.none()
-    
-    
-    
-    if user_role == 'employee':
-        user_requests = all_requests.filter(user_id=user_id)
-        
-        current_period = get_period_stats(0, user_requests)
-        previous_period = get_period_stats(1, user_requests)
-        
-        data = {
-            'total_requests': user_requests.count(),
-            'pending_requests': user_requests.filter(status='pending').count(),
-            'in_progress_requests': user_requests.filter(
-                status__in=['mg_approved', 'accounting_reviewed']
-            ).count(),
-            'approved_requests': user_requests.filter(status='director_approved').count(),
-            'rejected_requests': user_requests.filter(status='rejected').count(),
-            
-            'trends': {
-                'requests': calculate_trend(
-                    current_period['total_requests'], 
-                    previous_period['total_requests']
-                ),
-                'approved': calculate_trend(
-                    current_period['approved_requests'], 
-                    previous_period['approved_requests']
-                )
-            },
-            
-            'recent_requests': PurchaseRequestListSerializer(
-                user_requests.order_by('-created_at')[:10], many=True
-            ).data,
-            'all_requests': PurchaseRequestListSerializer(
-                user_requests.order_by('-created_at'), many=True
-            ).data,
-            
-            'current_period_stats': current_period,
-            'previous_period_stats': previous_period,
-        }
-        
-    elif user_role == 'mg':
-        mg_requests = get_role_specific_requests(all_requests, 'mg', user_id)
-        
-        mes_demandes = mg_requests.count()  
-        en_cours = all_requests.filter(status='pending').count()  
-        acceptees = mg_requests.filter(
-            Q(status__in=['mg_approved', 'accounting_reviewed', 'director_approved'])
-        ).count()  
-        refusees = mg_requests.filter(
-            status='rejected', rejected_by_role='mg'
-        ).count()  
-        
-        current_period = get_period_stats(0, mg_requests)
-        previous_period = get_period_stats(1, mg_requests)
-        
-        global_current_period = get_period_stats(0)  
-        global_previous_period = get_period_stats(1)  
-        
-        data = {
-            'mes_demandes': mes_demandes,
-            'en_cours': en_cours,
-            'acceptees': acceptees,
-            'refusees': refusees,
-            
-            'total_requests': all_requests.count(),
-            'in_progress_requests': all_requests.filter(
-                status__in=['pending', 'mg_approved', 'accounting_reviewed']
-            ).count(),
-            'approved_requests': all_requests.filter(status='director_approved').count(),
-            'rejected_requests': all_requests.filter(status='rejected').count(),
-            
-            'recent_requests': PurchaseRequestListSerializer(
-                mg_requests.order_by('-created_at')[:10], many=True
-            ).data,
-            
-            'all_requests': PurchaseRequestListSerializer(
-                all_requests.order_by('-created_at'), many=True
-            ).data,
-            
-            'trends': {
-                'requests': calculate_trend(
-                    current_period['total_requests'],
-                    previous_period['total_requests']
-                ),
-                'approved': calculate_trend(
-                    current_period['approved_requests'],
-                    previous_period['approved_requests']
-                ),
-                'amount': calculate_trend(
-                    global_current_period['total_amount'],
-                    global_previous_period['total_amount']
-                )
-            },
-            
-            'current_period_stats': current_period,
-            'previous_period_stats': previous_period,
-            
-            'validation_rate': round(global_current_period['validation_rate']),
-            'processing_delays': calculate_processing_delays(),
-            'department_stats': get_department_stats(),
-        }
-        
-    elif user_role == 'accounting':
-        accounting_requests = get_role_specific_requests(all_requests, 'accounting', user_id)
-        
-        mes_demandes = accounting_requests.count()  
-        en_cours = all_requests.filter(status='mg_approved').count()  
-        acceptees = accounting_requests.filter(
-            Q(status__in=['accounting_reviewed', 'director_approved'])
-        ).count()  
-        refusees = accounting_requests.filter(
-            status='rejected', rejected_by_role='accounting'
-        ).count()  
-        
-        current_period = get_period_stats(0, accounting_requests)
-        previous_period = get_period_stats(1, accounting_requests)
-        
-        data = {
-            'mes_demandes': mes_demandes,
-            'en_cours': en_cours, 
-            'acceptees': acceptees,
-            'refusees': refusees,
-            
-            'trends': {
-                'requests': calculate_trend(
-                    current_period['total_requests'],
-                    previous_period['total_requests']
-                ),
-                'approved': calculate_trend(
-                    current_period['approved_requests'],
-                    previous_period['approved_requests']
-                )
-            },
-            
-            'recent_requests': PurchaseRequestListSerializer(
-                accounting_requests.order_by('-created_at')[:10], many=True
-            ).data,
-            'all_requests': PurchaseRequestListSerializer(
-                accounting_requests.order_by('-created_at'), many=True
-            ).data,
-            
-            'current_period_stats': current_period,
-            'previous_period_stats': previous_period,
-        }
-        
-    elif user_role == 'director':
-        director_requests = get_role_specific_requests(all_requests, 'director', user_id)
-        
-        mes_demandes = director_requests.count()  
-        en_cours = all_requests.filter(status='accounting_reviewed').count()  
-        acceptees = director_requests.filter(status='director_approved').count()  
-        refusees = director_requests.filter(
-            status='rejected', rejected_by_role='director'
-        ).count()  
-        
-        current_period = get_period_stats(0, director_requests)  
-        previous_period = get_period_stats(1, director_requests)
-        
-        data = {
-            'mes_demandes': mes_demandes,
-            'en_cours': en_cours,
-            'acceptees': acceptees,
-            'refusees': refusees,
-            
-            'total_requests': all_requests.count(),
-            'in_progress_requests': all_requests.filter(
-                status__in=['pending', 'mg_approved', 'accounting_reviewed']
-            ).count(),
-            'approved_requests': all_requests.filter(status='director_approved').count(),
-            'rejected_requests': all_requests.filter(status='rejected').count(),
+    global_current_period = get_period_stats(0)
+    global_previous_period = get_period_stats(1)
+    current_period = get_period_stats(0, visible_requests)
+    previous_period = get_period_stats(1, visible_requests)
 
-            
-            'recent_requests': PurchaseRequestListSerializer(
-                director_requests.order_by('-created_at')[:10], many=True
-            ).data,
+    owned_active = owned_requests.exclude(status__in=['director_approved', 'rejected'])
 
-            'all_requests': PurchaseRequestListSerializer(
-                all_requests.order_by('-created_at'), many=True
-            ).data,
-            
-            'current_period_stats': current_period,
-            'previous_period_stats': previous_period,
-            
-            'validation_rate': round(current_period['validation_rate']),
-            'processing_delays': calculate_processing_delays(),
-            'department_stats': get_department_stats(),
+    overview = {
+        'role': user_role,
+        'owned_requests': owned_requests.count(),
+        'awaiting_feedback': owned_active.count(),
+        'approved_owned': owned_requests.filter(status='director_approved').count(),
+        'rejected_owned': owned_requests.filter(status='rejected').count(),
+        'total_visible': visible_requests.count(),
+        'awaiting_my_action': queue_queryset.count(),
+        'validated_by_me': my_validated.count(),
+        'rejected_by_me': my_rejections.count(),
+    }
 
-            'trends': {
-                'requests': calculate_trend(
-                    current_period['total_requests'], 
-                    previous_period['total_requests']
-                ),
-                'approved': calculate_trend(
-                    current_period['approved_requests'], 
-                    previous_period['approved_requests']
-                ),
-                'amount': calculate_trend(
-                    current_period['total_amount'], 
-                    previous_period['total_amount']
-                )
-            },
-        }
+    def compute_avg_handle_time(role):
+        start_field, end_field = ROLE_DURATION_FIELDS.get(role, (None, None))
+        if not start_field or not end_field:
+            return 0
+        qs = all_requests.exclude(**{f"{start_field}__isnull": True}).exclude(**{f"{end_field}__isnull": True})
+        durations = []
+        for req in qs:
+            start_value = getattr(req, start_field)
+            end_value = getattr(req, end_field)
+            if start_value and end_value and end_value > start_value:
+                durations.append((end_value - start_value).total_seconds())
+        if not durations:
+            return 0
+        return round((sum(durations) / len(durations)) / 86400, 2)
 
+    if queue_queryset.exists():
+        oldest_queue = queue_queryset.order_by('created_at').first()
+        oldest_wait = max((now - oldest_queue.created_at).days, 0)
     else:
-        data = {
-            'mes_demandes': 0,
-            'en_cours': 0,
-            'acceptees': 0,
-            'refusees': 0,
-            'recent_requests': [],
-            'all_requests': [],
-            'trends': {},
-            'current_period_stats': {'total_requests': 0, 'approved_requests': 0, 'total_amount': 0},
-            'previous_period_stats': {'total_requests': 0, 'approved_requests': 0, 'total_amount': 0}
+        oldest_wait = 0
+
+    performance_block = {
+        'avg_handle_time_days': compute_avg_handle_time(user_role),
+        'actions_last_30_days': RequestStep.objects.filter(
+            (Q(user=user) if user_role != 'employee' else Q(request__user=user)),
+            created_at__gte=now - timedelta(days=30)
+        ).count(),
+        'queue_oldest_waiting_days': oldest_wait,
+        'queue_size': queue_queryset.count(),
+    }
+
+    budget_block = {
+        'current_total': global_current_period['total_amount'],
+        'previous_total': global_previous_period['total_amount'],
+        'trend': calculate_trend(
+            global_current_period['total_amount'],
+            global_previous_period['total_amount']
+        ),
+        'validation_rate': round(global_current_period['validation_rate']),
+    }
+
+    team_activity = {}
+    for role_key, statuses in ROLE_QUEUE_STATUS.items():
+        members_count = User.objects.filter(role=role_key, is_active=True).count()
+        awaiting = all_requests.filter(status__in=statuses).count()
+        validated_today = RequestStep.objects.filter(
+            action='approved',
+            user__role=role_key,
+            created_at__date=today
+        ).count()
+        team_activity[role_key] = {
+            'label': ROLE_LABELS.get(role_key, role_key.title()),
+            'members': members_count,
+            'awaiting': awaiting,
+            'validated_today': validated_today,
         }
-    
-    data['user_requests_count'] = all_requests.filter(user=request.user).count()
-    data['processing_delays'] = calculate_processing_delays()
-    data['department_stats'] = get_department_stats()
-    
-    def get_monthly_stats():
-        """Calculer les statistiques mensuelles des 6 derniers mois"""
+
+    def get_monthly_stats(scope_queryset):
         monthly_stats = []
         for i in range(6):
-            date = timezone.now() - timedelta(days=30*i)
+            date = timezone.now() - timedelta(days=30 * i)
             month_start = date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             month_end = (month_start + timedelta(days=32)).replace(day=1) - timedelta(seconds=1)
-            
-            if user_role == 'employee':
-                month_count = all_requests.filter(
-                    user=request.user,
-                    created_at__gte=month_start,
-                    created_at__lte=month_end
-                ).count()
-            else:
-                month_count = all_requests.filter(
-                    created_at__gte=month_start,
-                    created_at__lte=month_end
-                ).count()
-            
+            queryset = scope_queryset if scope_queryset is not None else all_requests
+            month_count = queryset.filter(
+                created_at__gte=month_start,
+                created_at__lte=month_end
+            ).count()
             monthly_stats.append({
                 'month': date.strftime('%B %Y'),
                 'count': month_count
             })
-        
         monthly_stats.reverse()
         return monthly_stats
-    
-    data['monthly_stats'] = get_monthly_stats()
-    
+
     if user_role == 'employee':
-        user_requests = all_requests.filter(user=request.user)
-        requests_by_status = {
-            'pending': user_requests.filter(status='pending').count(),
-            'mg_approved': user_requests.filter(status='mg_approved').count(),
-            'accounting_reviewed': user_requests.filter(status='accounting_reviewed').count(),
-            'director_approved': user_requests.filter(status='director_approved').count(),
-            'rejected': user_requests.filter(status='rejected').count()
-        }
+        status_source = owned_requests
+        monthly_scope = owned_requests
     else:
-        requests_by_status = {
-            'pending': all_requests.filter(status='pending').count(),
-            'mg_approved': all_requests.filter(status='mg_approved').count(),
-            'accounting_reviewed': all_requests.filter(status='accounting_reviewed').count(),
-            'director_approved': all_requests.filter(status='director_approved').count(),
-            'rejected': all_requests.filter(status='rejected').count()
-        }
-    
-    data['requests_by_status'] = requests_by_status
-    
+        status_source = all_requests
+        monthly_scope = all_requests
+
+    requests_by_status = {
+        'pending': status_source.filter(status='pending').count(),
+        'mg_approved': status_source.filter(status='mg_approved').count(),
+        'accounting_reviewed': status_source.filter(status='accounting_reviewed').count(),
+        'director_approved': status_source.filter(status='director_approved').count(),
+        'rejected': status_source.filter(status='rejected').count()
+    }
+
+    recent_requests_serializer = PurchaseRequestListSerializer(
+        visible_requests.order_by('-created_at')[:10], many=True
+    ).data
+
+    if user_role in ['mg', 'director']:
+        all_requests_payload = PurchaseRequestListSerializer(
+            all_requests.order_by('-created_at'), many=True
+        ).data
+    else:
+        all_requests_payload = PurchaseRequestListSerializer(
+            visible_requests.order_by('-created_at'), many=True
+        ).data
+
+    trends = {
+        'requests': calculate_trend(
+            current_period['total_requests'], previous_period['total_requests']
+        ),
+        'approved': calculate_trend(
+            current_period['approved_requests'], previous_period['approved_requests']
+        ),
+        'amount': calculate_trend(
+            current_period['total_amount'], previous_period['total_amount']
+        ),
+    }
+
+    data = {
+        'overview': overview,
+        'queue': queue_details,
+        'recent_actions': recent_actions,
+        'team_activity': team_activity,
+        'performance': performance_block,
+        'flow_snapshot': flow_snapshot,
+        'budget': budget_block,
+        'current_period_stats': current_period,
+        'previous_period_stats': previous_period,
+        'recent_requests': recent_requests_serializer,
+        'all_requests': all_requests_payload,
+        'monthly_stats': get_monthly_stats(monthly_scope),
+        'requests_by_status': requests_by_status,
+        'trends': trends,
+        'queue_insights': {
+            'awaiting': queue_queryset.count(),
+            'oldest_waiting_days': oldest_wait,
+        },
+        'department_stats': get_department_stats(),
+        'processing_delays': calculate_processing_delays(),
+        'user_requests_count': owned_requests.count(),
+    }
+
+    # Compatibilité avec les anciens champs utilisés sur le front
+    data['total_requests'] = status_source.count()
+    data['pending_requests'] = requests_by_status['pending']
+    data['in_progress_requests'] = requests_by_status['mg_approved'] + requests_by_status['accounting_reviewed']
+    data['approved_requests'] = requests_by_status['director_approved']
+    data['rejected_requests'] = requests_by_status['rejected']
+    data['mes_demandes'] = overview['total_visible']
+    data['en_cours'] = overview['awaiting_my_action']
+    data['acceptees'] = overview['validated_by_me']
+    data['refusees'] = overview['rejected_by_me']
+
     logger.debug(
         "Dashboard data compiled for %s (ID %s): total=%s, status_breakdown=%s",
         user_role,
         user_id,
-        data.get('total_requests', data.get('mes_demandes', 0)),
+        data.get('total_requests', overview['total_visible']),
         data.get('requests_by_status'),
     )
-    
+
     return Response(data)
 
 
