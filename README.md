@@ -73,6 +73,9 @@ CORS_ALLOWED_ORIGINS=https://your-frontend.com,http://localhost:3000
 CSRF_TRUSTED_ORIGINS=https://your-frontend.com,http://localhost:3000
 JWT_COOKIE_DOMAIN=your-domain.com
 
+# Fichier d'environnement
+Copiez `.env.example` vers `.env` et remplissez les valeurs sensibles.
+
 # Email (Mailjet recommandé)
 EMAIL_PROVIDER=mailjet  # mailjet | smtp | console
 MAILJET_API_KEY=your_mailjet_api_key
