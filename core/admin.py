@@ -1,3 +1,4 @@
+from django import forms
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin
 from django.db.models import Count
@@ -19,8 +20,40 @@ from .models import (
     UserActivity,
 )
 
+DEPARTMENT_CHOICES = [
+    "Service Développement",
+    "Service Communication",
+    "Service Pédagogique",
+    "Administration",
+    "Comptabilité",
+    "Ressources Humaines",
+    "IT/Informatique",
+    "Commercial",
+    "Production",
+    "Logistique",
+    "Marketing",
+    "Autre",
+]
+
+
+class CustomUserAdminForm(forms.ModelForm):
+    department = forms.ChoiceField(
+        choices=[("", "Sélectionner un département")] + [
+            (dept, dept) for dept in DEPARTMENT_CHOICES
+        ],
+        required=False,
+        label="Département",
+    )
+
+    class Meta:
+        model = CustomUser
+        fields = "__all__"
+
+
 @admin.register(CustomUser)
 class CustomUserAdmin(UserAdmin):
+    form = CustomUserAdminForm
+    add_form = CustomUserAdminForm
     list_display = (
         'username',
         'email',
