@@ -15,7 +15,7 @@ from django.conf import settings
 
 class CustomUser(AbstractUser):
     ROLES = [
-        ('employee', 'Employé'),
+        ('employee', 'Personnel'),
         ('mg', 'Moyens Généraux'),
         ('accounting', 'Comptabilité'),
         ('director', 'Direction')
