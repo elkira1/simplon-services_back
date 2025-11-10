@@ -96,6 +96,11 @@ DEFAULT_FROM_NAME=Your Company Name
 # DEFAULT_FROM_NAME=Your Company Name
 # EMAIL_HOST=smtp.mailjet.com
 # EMAIL_PORT=587
+# MAILJET_SANDBOX_MODE=False
+# MAILJET_TRACK_OPENS=enabled   # enabled | disabled
+# MAILJET_TRACK_CLICKS=enabled  # enabled | disabled
+# MAILJET_MAX_RETRIES=3
+# MAILJET_RETRY_BACKOFF=1.5
 
 # Option 3 : Brevo (ex Sendinblue) via API HTTPS (recommandé sur Render)
 # EMAIL_PROVIDER=brevo

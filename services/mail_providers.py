@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from email.utils import formataddr
 from typing import Iterable, Sequence
 
@@ -72,6 +73,15 @@ class MailjetMailProvider(BaseMailProvider):
             raise MailProviderError("MAILJET_API_KEY/MAILJET_SECRET_KEY non configurés.")
 
         self.client = MailjetClient(auth=(api_key, secret_key), version="v3.1")
+        self.max_retries = getattr(settings, "MAILJET_MAX_RETRIES", 3)
+        self.retry_backoff = getattr(settings, "MAILJET_RETRY_BACKOFF", 1.5)
+        self.track_opens = getattr(
+            settings, "MAILJET_TRACK_OPENS", "enabled"
+        )  # enabled | disabled
+        self.track_clicks = getattr(
+            settings, "MAILJET_TRACK_CLICKS", "enabled"
+        )
+        self.sandbox_mode = getattr(settings, "MAILJET_SANDBOX_MODE", False)
 
     def send(
         self,
@@ -83,26 +93,46 @@ class MailjetMailProvider(BaseMailProvider):
         from_email: str,
         from_name: str,
     ) -> None:
-        payload = {
-            "Messages": [
-                {
-                    "From": {
-                        "Email": from_email,
-                        "Name": from_name,
-                    },
-                    "To": [{"Email": email} for email in recipients],
-                    "Subject": subject,
-                    "HTMLPart": html_content,
-                    "TextPart": text_content or strip_tags(html_content),
-                }
-            ]
+        base_message = {
+            "From": {
+                "Email": from_email,
+                "Name": from_name,
+            },
+            "To": [{"Email": email} for email in recipients],
+            "Subject": subject,
+            "HTMLPart": html_content,
+            "TextPart": text_content or strip_tags(html_content),
+            "TrackOpens": self.track_opens,
+            "TrackClicks": self.track_clicks,
         }
 
-        result = self.client.send.create(data=payload)
-        if result.status_code >= 400:
-            raise MailProviderError(
-                f"Mailjet API error {result.status_code}: {result.json()}"
-            )
+        if self.sandbox_mode:
+            base_message["SandboxMode"] = True
+
+        payload = {"Messages": [base_message]}
+
+        last_exc = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                result = self.client.send.create(data=payload)
+                if result.status_code >= 400:
+                    raise MailProviderError(
+                        f"Mailjet API error {result.status_code}: {result.json()}"
+                    )
+                return
+            except Exception as exc:  # pragma: no cover - dépend du réseau
+                last_exc = exc
+                logger.warning(
+                    "Mailjet send attempt %s/%s failed: %s",
+                    attempt,
+                    self.max_retries,
+                    exc,
+                )
+                if attempt < self.max_retries:
+                    sleep_for = self.retry_backoff * attempt
+                    time.sleep(sleep_for)
+                else:
+                    raise MailProviderError(str(exc)) from exc
 
 
 class BrevoMailProvider(BaseMailProvider):
