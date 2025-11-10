@@ -76,14 +76,26 @@ JWT_COOKIE_DOMAIN=your-domain.com
 # Fichier d'environnement
 Copiez `.env.example` vers `.env` et remplissez les valeurs sensibles.
 
-# Email (Mailjet recommandé)
-EMAIL_PROVIDER=mailjet  # mailjet | smtp | console
-MAILJET_API_KEY=your_mailjet_api_key
-MAILJET_SECRET_KEY=your_mailjet_secret_key
-DEFAULT_FROM_EMAIL=noreply@your-domain.com
-DEFAULT_FROM_NAME=Your Company Name
-EMAIL_HOST=smtp.mailjet.com
+# Email (SMTP / Gmail / Mailjet)
+# Option 1 : Gmail (mot de passe applicatif requis)
+EMAIL_PROVIDER=gmail  # alias smtp -> smtp.gmail.com
+EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
+EMAIL_HOST=smtp.gmail.com
 EMAIL_PORT=587
+EMAIL_USE_TLS=True
+EMAIL_HOST_USER=ton-adresse@gmail.com
+EMAIL_HOST_PASSWORD=mot_de_passe_app_google  # généré via la 2FA
+DEFAULT_FROM_EMAIL=ton-adresse@gmail.com
+DEFAULT_FROM_NAME=Your Company Name
+
+# Option 2 : Mailjet
+# EMAIL_PROVIDER=mailjet
+# MAILJET_API_KEY=your_mailjet_api_key
+# MAILJET_SECRET_KEY=your_mailjet_secret_key
+# DEFAULT_FROM_EMAIL=noreply@your-domain.com
+# DEFAULT_FROM_NAME=Your Company Name
+# EMAIL_HOST=smtp.mailjet.com
+# EMAIL_PORT=587
 
 # Stockage (Supabase)
 SUPABASE_ENABLED=true

@@ -133,6 +133,7 @@ def strip_tags(value: str) -> str:
 
 PROVIDERS = {
     "smtp": SMTPMailProvider,
+    "gmail": SMTPMailProvider,  # alias pratique pour EMAIL_PROVIDER=gmail
     "mailjet": MailjetMailProvider,
     "console": ConsoleMailProvider,
 }
