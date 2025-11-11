@@ -25,6 +25,8 @@ DEPARTMENT_CHOICES = [
     "Service Développement",
     "Service Communication",
     "Service Pédagogique",
+    "Service Moyens Généraux",
+    "Service Insertion",
     "Administration",
     "Comptabilité",
     "Ressources Humaines",
@@ -37,28 +39,77 @@ DEPARTMENT_CHOICES = [
 ]
 
 
-class CustomUserAdminForm(forms.ModelForm):
-    department = forms.ChoiceField(
-        choices=[("", "Sélectionner un département")] + [
-            (dept, dept) for dept in DEPARTMENT_CHOICES
-        ],
-        required=False,
-        label="Département",
-    )
+def split_departments(value):
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        items = value
+    else:
+        items = str(value).replace(",", "|").split("|")
+    return [item.strip() for item in items if isinstance(item, str) and item.strip()]
+
+
+class DepartmentFieldMixin:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['department'] = forms.MultipleChoiceField(
+            choices=[(dept, dept) for dept in DEPARTMENT_CHOICES],
+            required=False,
+            widget=forms.CheckboxSelectMultiple,
+            label="Départements",
+            help_text="Sélectionnez un ou plusieurs départements officiels.",
+        )
+        custom_field = self.fields.get('custom_departments')
+        if custom_field:
+            custom_field.required = False
+            custom_field.label = "Départements personnalisés"
+            custom_field.help_text = (
+                "Séparez plusieurs valeurs par « | » ou « , » (ex: FabLab | Innovation)."
+            )
+
+        if self.is_bound:
+            return
+        raw_departments = ""
+        if getattr(self.instance, "department", None):
+            raw_departments = self.instance.department
+        elif self.initial.get("department"):
+            raw_departments = self.initial["department"]
+
+        parsed = split_departments(raw_departments)
+        available = {choice for choice, _ in self.fields["department"].choices}
+        known = [dept for dept in parsed if dept in available]
+        custom = [dept for dept in parsed if dept not in available]
+
+        if known:
+            self.initial["department"] = known
+        if custom:
+            self.initial["custom_departments"] = " | ".join(custom)
+
+    def clean(self):
+        cleaned = super().clean()
+        selected = cleaned.get("department") or []
+        custom_raw = cleaned.get("custom_departments") or ""
+        custom_items = split_departments(custom_raw)
+
+        combined = []
+        for dept in list(selected) + custom_items:
+            if dept and dept not in combined:
+                combined.append(dept)
+
+        cleaned["department"] = " | ".join(combined)
+        return cleaned
+
+
+class CustomUserAdminForm(DepartmentFieldMixin, forms.ModelForm):
+    custom_departments = forms.CharField(widget=forms.TextInput, required=False)
 
     class Meta:
         model = CustomUser
         fields = "__all__"
 
 
-class CustomUserCreationForm(UserCreationForm):
-    department = forms.ChoiceField(
-        choices=[("", "Sélectionner un département")] + [
-            (dept, dept) for dept in DEPARTMENT_CHOICES
-        ],
-        required=False,
-        label="Département",
-    )
+class CustomUserCreationForm(DepartmentFieldMixin, UserCreationForm):
+    custom_departments = forms.CharField(widget=forms.TextInput, required=False)
 
     class Meta(UserCreationForm.Meta):
         model = CustomUser
@@ -102,6 +153,7 @@ class CustomUserAdmin(UserAdmin):
                 'fields': (
                     'role',
                     'department',
+                    'custom_departments',
                     'phone',
                     'created_by',
                     'created_at',
@@ -122,7 +174,7 @@ class CustomUserAdmin(UserAdmin):
         (
             'Informations supplémentaires',
             {
-                'fields': ('role', 'department', 'phone', 'created_by'),
+                'fields': ('role', 'department', 'custom_departments', 'phone', 'created_by'),
             },
         ),
     )
